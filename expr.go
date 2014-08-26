@@ -27,7 +27,7 @@ type V map[string]interface{}
 type Expression struct {
 	ast   *ast.Expr
 	Expr  string
-	Terms []string // Collected terms from the expression.
+	Terms []string // Collected terms from the expression. May contain duplicates.
 }
 
 func MustCompile(expr string) *Expression {
@@ -67,7 +67,7 @@ func (e *Expression) compile() error {
 		return err
 	}
 	e.ast = &ast
-	e.Terms = index(ast)
+	index(ast, &e.Terms)
 	return nil
 }
 
@@ -81,15 +81,15 @@ func (e *Expression) Bool(value V) bool {
 	if err != nil {
 		return false
 	}
-	return toBool(v)
+	return boolCast(v)
 }
 
 // Eval evaluates an expression against a value and returns the final result.
 //
 // Type evaluation is much less strict than Go. In particular, signed
 // integers, unsigned integers and float values are converted to the largest
-// similar type that fits each respective type. So, int8 -> int64, float32 ->
-// float64, and so on. Additionally, nil values are treated as false.
+// super type. So, int8 -> int64, float32 -> float64, and so on. Additionally,
+// nil values are treated as false.
 func (e *Expression) Eval(value V) (v interface{}, err error) {
 	if e.Expr == "" {
 		return "", nil
@@ -103,6 +103,8 @@ func (e *Expression) Eval(value V) (v interface{}, err error) {
 	return
 }
 
+// Normalize all int values to int64, all unsigned int values to uint64 and
+// all float values to float64.
 func normalize(v interface{}) interface{} {
 	switch rv := v.(type) {
 	case int:
@@ -134,58 +136,49 @@ func normalize(v interface{}) interface{} {
 	case string:
 		return v
 	}
-	if v == nil {
-		return false
-	}
 	return v
 }
 
-func index(expr ast.Node) (out []string) {
-	next := []string{}
+func index(expr ast.Node, out *[]string) {
 	switch n := expr.(type) {
 	case *ast.BinaryExpr:
-		next = index(n.X)
-		next = index(n.Y)
+		index(n.X, out)
+		index(n.Y, out)
 	case *ast.ParenExpr:
-		next = index(n.X)
+		index(n.X, out)
 	case *ast.Ident:
 		if n.Name != "nil" && n.Name != "true" && n.Name != "false" {
-			next = append(next, n.Name)
+			*out = append(*out, n.Name)
 		}
 	}
-	out = append(out, next...)
-	return out
 }
 
 func eval(value V, expr ast.Node) interface{} {
 	switch n := expr.(type) {
 	case *ast.BinaryExpr:
-		ll := eval(value, n.X)
+		ll := normalize(eval(value, n.X))
+
+		switch n.Op {
+		case token.LAND:
+			return boolCast(ll) && boolCast(eval(value, n.Y))
+		case token.LOR:
+			return boolCast(ll) || boolCast(eval(value, n.Y))
+		}
 
 		// Bool is first, to support short-circuit evaluation.
 		if l, ok := ll.(bool); ok {
 			switch n.Op {
-			case token.LAND:
-				return l && toBool(eval(value, n.Y))
-			case token.LOR:
-				return l || toBool(eval(value, n.Y))
 			case token.EQL:
-				r := eval(value, n.Y)
-				if r == nil {
-					return false
-				}
+				r := boolCast(eval(value, n.Y))
 				return l == r
 			case token.NEQ:
-				r := eval(value, n.Y)
-				if r == nil {
-					return true
-				}
+				r := boolCast(eval(value, n.Y))
 				return l != r
 			}
 			panic(fmt.Errorf("unsupported boolean operation"))
 		}
 
-		rr := eval(value, n.Y)
+		rr := normalize(eval(value, n.Y))
 
 		if ll == nil {
 			switch n.Op {
@@ -203,14 +196,13 @@ func eval(value V, expr ast.Node) interface{} {
 			case token.NEQ:
 				return ll != nil
 			}
+		} else {
+			rr = normalize(rr)
 		}
 
 		switch l := ll.(type) {
 		case int64:
-			r, ok := rr.(int64)
-			if !ok {
-				r = int64(rr.(uint64))
-			}
+			r := intCast(rr)
 			switch n.Op {
 			case token.EQL:
 				return l == r
@@ -257,10 +249,7 @@ func eval(value V, expr ast.Node) interface{} {
 			}
 
 		case uint64:
-			r, ok := rr.(uint64)
-			if !ok {
-				r = uint64(rr.(int64))
-			}
+			r := uintCast(rr)
 			switch n.Op {
 			case token.EQL:
 				return l == r
@@ -301,7 +290,7 @@ func eval(value V, expr ast.Node) interface{} {
 			}
 
 		case string:
-			r := rr.(string)
+			r := stringCast(rr)
 			switch n.Op {
 			case token.ADD:
 				return l + r
@@ -320,7 +309,7 @@ func eval(value V, expr ast.Node) interface{} {
 				return l >= r
 			}
 		case float64:
-			r := rr.(float64)
+			r := floatCast(rr)
 			switch n.Op {
 			case token.ADD:
 				return l + r
@@ -381,7 +370,7 @@ func eval(value V, expr ast.Node) interface{} {
 		return eval(value, n.X)
 	case *ast.UnaryExpr:
 		if n.Op == token.NOT {
-			return !toBool(eval(value, n.X))
+			return !boolCast(eval(value, n.X))
 		}
 		panic(fmt.Errorf("unsupported unary operator %s", n.Op))
 	case *ast.Ident:
@@ -406,7 +395,70 @@ func eval(value V, expr ast.Node) interface{} {
 	panic(fmt.Errorf("unsupported expression node %#v", expr))
 }
 
-func toBool(v interface{}) bool {
+func intCast(v interface{}) int64 {
+	if v == nil {
+		return 0
+	}
+	switch rv := normalize(v).(type) {
+	case int64:
+		return rv
+	case uint64:
+		return int64(rv)
+	case float64:
+		return int64(rv)
+	case bool:
+		if rv {
+			return 1
+		}
+		return 0
+	default:
+		panic(fmt.Errorf("not castable to an int64"))
+	}
+}
+
+func uintCast(v interface{}) uint64 {
+	if v == nil {
+		return 0
+	}
+	switch rv := normalize(v).(type) {
+	case int64:
+		return uint64(rv)
+	case uint64:
+		return rv
+	case float64:
+		return uint64(rv)
+	case bool:
+		if rv {
+			return 1
+		}
+		return 0
+	default:
+		panic(fmt.Errorf("not castable to an uint64"))
+	}
+}
+
+func floatCast(v interface{}) float64 {
+	if v == nil {
+		return 0
+	}
+	switch rv := normalize(v).(type) {
+	case int64:
+		return float64(rv)
+	case uint64:
+		return float64(rv)
+	case float64:
+		return rv
+	case bool:
+		if rv {
+			return 1.0
+		}
+		return 0.0
+	default:
+		panic(fmt.Errorf("not castable to a float64"))
+	}
+}
+
+func boolCast(v interface{}) bool {
 	if v == nil {
 		return false
 	}
@@ -421,6 +473,14 @@ func toBool(v interface{}) bool {
 		return rv != 0
 	case float64:
 		return rv != 0.0
+	default:
+		panic(fmt.Errorf("unsupported boolean value"))
 	}
-	return true
+}
+
+func stringCast(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	return fmt.Sprintf("%v", v)
 }

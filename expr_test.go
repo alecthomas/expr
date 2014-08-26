@@ -71,9 +71,20 @@ func TestEvaluateComplex(t *testing.T) {
 	assert.Equal(t, 4, n)
 }
 
-func TestEvaluateMixedTypesErrors(t *testing.T) {
-	_, err := MustCompile(`"foo" + 10`).Eval(V{})
-	assert.Error(t, err)
+func TestEvaluateStringCoercion(t *testing.T) {
+	n, err := MustCompile(`"foo" + 10`).Eval(V{})
+	assert.NoError(t, err)
+	assert.Equal(t, "foo10", n)
+}
+
+func TestTruthinessLogical(t *testing.T) {
+	n := MustCompile("a && b").Bool(V{"a": 1, "b": 1})
+	assert.True(t, n)
+}
+
+func TestTerms(t *testing.T) {
+	e := MustCompile("a + b * c + c")
+	assert.Equal(t, []string{"a", "b", "c", "c"}, e.Terms)
 }
 
 func BenchmarkMatching(b *testing.B) {
@@ -93,4 +104,12 @@ func BenchmarkEval(t *testing.B) {
 			panic(err)
 		}
 	}
+}
+
+func TestStringCast(t *testing.T) {
+	assert.Equal(t, "10", stringCast(int64(10)))
+	assert.Equal(t, "10.5", stringCast(float64(10.5)))
+	assert.Equal(t, "true", stringCast(true))
+	assert.Equal(t, "", stringCast(nil))
+	assert.Equal(t, "hello", stringCast("hello"))
 }
