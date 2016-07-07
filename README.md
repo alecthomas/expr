@@ -28,6 +28,7 @@ It *does* support:
 
 - Truthiness evaluation, ala Python: eg. given `V{"a": 1}`, evaluating `a` will be true.
 - Automatic type coercion. eg. `"a" + 10` == `"a10"`
+- Nested fields. eg. `A.B == 2`
 
 # Why?
 
